@@ -46,25 +46,53 @@ export const wardrobeItems=wardrobeCategories.flatMap(c=>c.items);
 export const outfitSlots=['Tops','Layers','Coat','Pants','Shoes','Accessories'] as const;
 export type OutfitSlot=typeof outfitSlots[number];
 export type WardrobeRecommendation={pieces:Record<OutfitSlot,string>;items:WardrobeItem[];note:string};
-export function recommendWardrobe(ids:string[],feels:number|null,cold=50,coatOverride='',wet=false,gym=false):WardrobeRecommendation {
+// Upper bounds are exclusive. All algorithm inputs use Fahrenheit, regardless of display units.
+export const temperatureRules = [
+  { below:32, label:'Freezing', top:2, layer:4, outer:4, bottom:3, shoe:4, advice:'Wear a heavy coat, sweater, warm pants, boots, and gloves.' },
+  { below:50, label:'Cold', top:2, layer:2, outer:3, bottom:2, shoe:2, advice:'Wear a jacket, long sleeves, pants, and closed shoes.' },
+  { below:65, label:'Cool', top:1, layer:2, outer:1, bottom:1, shoe:1, advice:'Wear a light jacket or hoodie, pants, and sneakers.' },
+  { below:80, label:'Warm', top:0, layer:null, outer:null, bottom:0, shoe:1, advice:'Wear a T-shirt, light pants or shorts, and sneakers.' },
+  { below:Infinity, label:'Hot', top:0, layer:null, outer:null, bottom:0, shoe:0, advice:'Wear a breathable shirt, shorts, and sandals.' },
+] as const;
+export function temperatureRule(feels:number) {
+  if(!Number.isFinite(feels)) throw new Error('A finite feels-like temperature is required.');
+  return temperatureRules.find(rule=>feels<rule.below)!;
+}
+export function recommendWardrobe(ids:string[],feels:number|null,cold=50,coatOverride='',wet=false,gym=false,snow=false,wind=0):WardrobeRecommendation {
   const available=wardrobeItems.filter(i=>ids.includes(i.id));
-  // Comfort sensitivity nudges the weather band without making warm weather look cool.
-  const adjusted=(feels??60)+(cold<35?-3:cold>65?3:0);
-  const target=adjusted<38?4:adjusted<52?3:adjusted<64?2:adjusted<72?1:0;
+  const knownWeather=feels!==null&&Number.isFinite(feels);
+  // Preserve the existing comfort slider: colder preference requests warmer clothing.
+  const offset=cold<35?-3:cold>65?3:0;
+  const rule=temperatureRule((knownWeather?feels:60)+offset);
+  const freezing=rule.label==='Freezing', chilly=freezing||rule.label==='Cold';
+  const waterproof=wet||snow, windy=wind>=20;
   const chosen:WardrobeItem[]=[];
-  const pick=(roles:WardrobeRole[],warmth=target)=>available.filter(i=>roles.includes(i.role)).sort((a,b)=>(Math.abs(a.warmth-warmth)+(wet&&['outer','shoe'].includes(a.role)&&!a.wet?3:0))-(Math.abs(b.warmth-warmth)+(wet&&['outer','shoe'].includes(b.role)&&!b.wet?3:0)))[0];
-  const gymTop=gym?pick(['gymTop']):undefined;
-  const top=gymTop||pick(['top','dress'])||pick(['gymTop']);
-  const layer=target>=2?(gym?pick(['gymLayer'])||pick(['layer']):pick(['layer'])):undefined;
-  const outer=available.find(i=>i.role==='outer'&&i.name===coatOverride)||(target>=2||wet?pick(['outer']):undefined);
-  const gymBottom=gym?pick(['gymBottom']):undefined;
-  const bottom=top?.role!=='dress'?(gymBottom||pick(['bottom'])||pick(['gymBottom'])):undefined;
-  const shoe=pick(['shoe']);
-  const accessories=available.filter(i=>i.role==='accessory'&&((wet&&i.wet)||(target>=3?i.warmth>=3:target<=1?['Sunglasses','Baseball cap'].includes(i.name):i.name==='Cotton socks'))).slice(0,3);
-  for(const item of [top,layer,outer,bottom,shoe,...accessories])if(item)chosen.push(item);
+  const pick=(roles:WardrobeRole[],warmth:number)=>available.filter(i=>roles.includes(i.role)).sort((a,b)=>{
+    const score=(i:WardrobeItem)=>Math.abs(i.warmth-warmth)+(rule.label==='Hot'&&i.role==='shoe'&&i.name!=='Sandals'?0.25:0)+(windy&&!waterproof&&i.role==='outer'&&i.name!=='Windbreaker'?0.25:0)+(waterproof&&['outer','shoe'].includes(i.role)&&!i.wet?10:0)+(windy&&i.role==='outer'&&!i.wet&&!['Windbreaker','Softshell jacket'].includes(i.name)?2:0);
+    return score(a)-score(b);
+  })[0];
+  const gymTop=gym?pick(['gymTop'],rule.top):undefined;
+  const top=gymTop||pick(['top','dress'],rule.top)||pick(['gymTop'],rule.top);
+  const layer=rule.layer!==null?(gym?pick(['gymLayer'],rule.layer)||pick(['layer'],rule.layer):pick(['layer'],rule.layer)):undefined;
+  // A hoodie alone is enough in cool, dry weather. Add a light jacket when no hoodie is owned.
+  const needOuter=chilly||waterproof||windy||(rule.outer!==null&&!layer);
+  const outer=available.find(i=>i.role==='outer'&&i.name===coatOverride)||(needOuter?pick(['outer'],rule.outer??1):undefined);
+  const gymBottom=gym?pick(['gymBottom'],rule.bottom):undefined;
+  const bottom=top?.role!=='dress'?(gymBottom||pick(['bottom'],rule.bottom)||pick(['gymBottom'],rule.bottom)):undefined;
+  const baseBottom=freezing&&top?.role!=='dress'?pick(['baseBottom'],3):undefined;
+  const shoe=pick(['shoe'],snow?4:rule.shoe);
+  const accessories=available.filter(i=>i.role==='accessory'&&((waterproof&&i.wet)||(chilly?i.warmth>=3:rule.layer===null?['Sunglasses','Baseball cap'].includes(i.name):i.name==='Cotton socks'))).slice(0,freezing?4:3);
+  for(const item of [top,layer,outer,bottom,baseBottom,shoe,...accessories])if(item)chosen.push(item);
+  const adjustments=[snow?'Snow: choose waterproof boots and outerwear.':wet?'Rain: choose waterproof shoes and a rain jacket or umbrella.':'',windy?'Strong wind: bring a wind-resistant outer layer.':''].filter(Boolean);
   return {
-    pieces:{Tops:top?.name||'No top selected',Layers:layer?.name||(target<2?'No extra layer needed':'No layer selected'),Coat:outer?.name||(target<2?'No coat needed':'No coat selected'),Pants:top?.role==='dress'?'Included in your dress':bottom?.name||'No bottoms selected',Shoes:shoe?.name||'No footwear selected',Accessories:accessories.map(i=>i.name).join(' + ')||'No accessories selected'},
+    pieces:{Tops:top?.name||'No top selected',Layers:layer?.name||(rule.layer===null?'No extra layer needed':'No layer selected'),Coat:outer?.name||(needOuter?'No coat selected':'No coat needed'),Pants:top?.role==='dress'?'Included in your dress':[bottom?.name||'No bottoms selected',baseBottom?.name].filter(Boolean).join(' + '),Shoes:shoe?.name||'No footwear selected',Accessories:accessories.map(i=>i.name).join(' + ')||'No accessories selected'},
     items:chosen,
-    note:!available.length?'Choose wardrobe items to get suggestions using clothes you own.':gym&&(gymTop||gymBottom)?`Gym is on your plan, so workout pieces from your wardrobe are included with weather-ready layers.`:gym?'Gym is on your plan. Add gym clothing to your wardrobe for a workout-ready update.':feels===null?'Using your selected items. Weather is unavailable; check conditions before heading out.':`Selected from your wardrobe for ${target>=3?'colder':target<=1?'milder':'cool'} conditions. You can change your choices anytime.`,
+    note:!knownWeather?'Weather is unavailable; using your selected items. Check conditions before heading out.':[
+      `${rule.label} conditions. ${rule.advice}`,
+      ...adjustments,
+      offset?'Adjusted for your temperature preference.':'',
+      !available.length?'Choose wardrobe items to get suggestions using clothes you own.':'Selected from clothes you own; add any missing weather-appropriate pieces to your wardrobe.',
+      gym?(gymTop||gymBottom?'Gym is on your plan, so workout pieces are included.':'Add gym clothing to your wardrobe for a workout-ready update.'):'',
+    ].filter(Boolean).join(' '),
   };
 }

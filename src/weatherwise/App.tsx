@@ -133,9 +133,12 @@ export default function App({initialAccount}:{initialAccount:AccountView|null}) 
   const forecastHours=weather.data?periodHours(weather.data,period):[];
   // Today responds to current conditions; period-specific Outfit views plan for the coolest hour in that period.
   const feels=weather.data?(page==='today'?weather.data.feels:forecastHours.length?Math.min(...forecastHours.map(h=>h.feels)):weather.data.feels):null;
-  const wet=forecastHours.some(h=>h.rainChance>=50||h.snow>0);
+  const snowCode=(code:number)=>[71,73,75,77,85,86].includes(code);
+  const rainCode=(code:number)=>(code>=51&&code<=67)||(code>=80&&code<=82)||code>=95;
+  const snow=weather.data?(page==='today'?snowCode(weather.data.code):forecastHours.some(h=>h.snow>0||snowCode(h.code))||(!forecastHours.length&&snowCode(weather.data.code))):false;
+  const wet=weather.data?(page==='today'?rainCode(weather.data.code)||snow:forecastHours.some(h=>h.rainChance>=50||rainCode(h.code))||snow||(!forecastHours.length&&rainCode(weather.data.code))):false;
   const gymToday=todayActivities.some(activity=>activity.kind==='gym');
-  const generatedRecommendation=recommendWardrobe(wardrobe,feels,cold,coat,wet,gymToday);
+  const generatedRecommendation=recommendWardrobe(wardrobe,feels,cold,coat,wet,gymToday,snow,weather.data?.wind??0);
   const recommendation:WardrobeRecommendation=wornOutfit?{
     items:wornOutfit.itemIds?.length?wardrobeItems.filter(item=>wornOutfit.itemIds!.includes(item.id)):generatedRecommendation.items,
     pieces:{Tops:wornOutfit.pieces[0]||'Not selected',Layers:'',Coat:wornOutfit.pieces[1]||'Not selected',Pants:wornOutfit.pieces[2]||'Not selected',Shoes:wornOutfit.pieces[3]||'Not selected',Accessories:wornOutfit.pieces[4]||'Not selected'},
